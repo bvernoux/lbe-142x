@@ -117,7 +117,7 @@ int lbe_get_device_status(struct lbe_device* dev, struct lbe_status* status) {
 		status->frequency1 = buf[6] | (buf[7] << 8) | (buf[8] << 16) | (buf[9] << 24);
 		status->frequency2 = buf[14] | (buf[15] << 8) | (buf[16] << 16) | (buf[17] << 24);
 	}
-	status->outputs_enabled = (status->raw_status & 0x7F) == 0x7F;
+	status->outputs_enabled = (status->raw_status & (LBE_OUT1_EN_BIT | LBE_OUT2_EN_BIT)) == (LBE_OUT1_EN_BIT | LBE_OUT2_EN_BIT);
 	status->fll_enabled = buf[18] != 0;
 	status->pll_locked = (status->raw_status & LBE_PLL_LOCK_BIT) != 0;
 
