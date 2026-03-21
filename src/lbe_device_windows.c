@@ -147,7 +147,6 @@ int lbe_get_device_status(struct lbe_device* dev, struct lbe_status* status) {
 		status->out1_power_low = buf[20] != 0;
 		status->out2_power_low = buf[21] != 0;
 	} else {
-		status->pll_locked = 0;
 		status->antenna_ok = (status->raw_status & LBE_ANT_OK_BIT) != 0;
 		status->pps_enabled = 0;
 		status->out1_power_low = buf[20] != 0;
