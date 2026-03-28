@@ -38,7 +38,7 @@ static int is_lbe_device(const char *path) {
 	}
 
 	close(fd);
-	return (info.vendor == VID_LBE && (info.product == PID_LBE_1420 || info.product == PID_LBE_1421));
+	return (info.vendor == VID_LBE && (info.product == PID_LBE_1420 || info.product == PID_LBE_1421 || PID_LBE_1423));
 }
 
 struct lbe_device* lbe_open_device(void) {

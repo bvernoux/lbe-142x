@@ -59,7 +59,7 @@ struct lbe_device* lbe_open_device(void) {
 		if (libusb_get_device_descriptor(device, &desc) < 0)
 			continue;
 
-		if (desc.idVendor == VID_LBE && (desc.idProduct == PID_LBE_1420 || desc.idProduct == PID_LBE_1421)) {
+		if (desc.idVendor == VID_LBE && (desc.idProduct == PID_LBE_1420 || desc.idProduct == PID_LBE_1421 || desc.idProduct == PID_LBE_1423)) {
 			ret = libusb_open(device, &dev->handle);
 			if (ret < 0) {
 				fprintf(stderr, "Failed to open device: %s\n", libusb_error_name(ret));

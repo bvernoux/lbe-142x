@@ -5,6 +5,7 @@
 #define VID_LBE 0x1dd2
 #define PID_LBE_1420 0x2443
 #define PID_LBE_1421 0x2444 // LBE-1421 Dual Output
+#define PID_LBE_1423 0x226f // LBE-1423 differential pps
 
 /* Device status bits */
 #define LBE_GPS_LOCK_BIT  (1 << 0)
