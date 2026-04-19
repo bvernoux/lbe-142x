@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <dirent.h>
+#include <sys/select.h>
 
 #define REPORT_SIZE 60
 
@@ -38,7 +39,75 @@ static int is_lbe_device(const char *path) {
 	}
 
 	close(fd);
-	return (info.vendor == VID_LBE && (info.product == PID_LBE_1420 || info.product == PID_LBE_1421 || PID_LBE_1423));
+	return (info.vendor == VID_LBE &&
+	        (info.product == PID_LBE_1420 ||
+	         info.product == PID_LBE_1421 ||
+	         info.product == PID_LBE_1423 ||
+	         info.product == PID_LBE_MINI));
+}
+
+/* Mini speaks the same HID wire format as the vendor Windows tool:
+ * wValue must be 0x0300 with the opcode in the payload. Linux hidraw
+ * puts buf[0] into wValue's low byte, so buf[0] stays 0 and the
+ * opcode goes at buf[1]. Required for opcodes 0x08 and 0x0A; other
+ * opcodes also work under the legacy buf[0]=opcode path but are sent
+ * this way for consistency. */
+static int mini_set_feat(int fd, uint8_t op, const uint8_t *args, size_t n) {
+	uint8_t buf[REPORT_SIZE] = {0};
+	buf[1] = op;
+	if (args && n) memcpy(&buf[2], args, n);
+	return ioctl(fd, HIDIOCSFEATURE(REPORT_SIZE), buf);
+}
+
+/* The Mini boots with only u-blox CFG-ACKs in its input-report buffer.
+ * Three SET_REPORTs with opcode 0x08 wrap UBX-CFG-MSG writes that
+ * enable NAV-SVINFO, NAV-CLOCK and NAV-PVT forwarding. Opcode 0x0A
+ * must precede them; it also leaves the next two feature reads
+ * returning descriptor bytes, which we drain. Captured from the
+ * vendor tool pcap. */
+static void mini_enable_gps_stream(int fd) {
+	static const uint8_t svinfo[] = {0x06, 0x01, 0x08, 0x00, 0x01, 0x30, 0x14};
+	static const uint8_t clock_[] = {0x06, 0x01, 0x08, 0x00, 0x01, 0x22, 0x14};
+	static const uint8_t pvt[]    = {0x06, 0x01, 0x08, 0x00, 0x01, 0x07, 0x0A};
+	uint8_t refresh[] = {0x04};
+	uint8_t drain[REPORT_SIZE];
+	mini_set_feat(fd, 0x0A, refresh, sizeof refresh);
+	drain[0] = 0x4B; (void)ioctl(fd, HIDIOCGFEATURE(REPORT_SIZE), drain);
+	drain[0] = 0x4B; (void)ioctl(fd, HIDIOCGFEATURE(REPORT_SIZE), drain);
+	mini_set_feat(fd, 0x08, svinfo, sizeof svinfo);
+	mini_set_feat(fd, 0x08, clock_, sizeof clock_);
+	mini_set_feat(fd, 0x08, pvt, sizeof pvt);
+}
+
+/* Scan up to ~1s of input reports and report what was seen.
+ * The firmware alternates two input-report variants:
+ *   - Status variant: byte[1] bit 7 = 0, byte[2] holds GPS/PLL flags.
+ *   - UBX variant:    byte[1] bit 7 = 1, byte[2..] is raw u-blox bytes,
+ *                     occasionally carrying UBX-NAV-PVT.
+ * From the status variant we read bit 1 of byte[2] as the real GPS
+ * disciplined PLL lock. From the UBX variant we pick up fixType for
+ * GPS lock. Both fields are returned via pointers; each stays at its
+ * "unknown" sentinel if that variant was not seen in the window. */
+static void mini_read_input_state(int fd, int *pvt_fix, int *pll_gps_locked) {
+	*pvt_fix = -1;
+	*pll_gps_locked = -1;
+	for (int i = 0; i < 300; i++) {
+		struct timeval tv = { 0, 50 * 1000 };
+		fd_set rfds;
+		FD_ZERO(&rfds);
+		FD_SET(fd, &rfds);
+		if (select(fd + 1, &rfds, NULL, NULL, &tv) <= 0) continue;
+		uint8_t r[64];
+		if (read(fd, r, sizeof r) != (ssize_t)sizeof r) continue;
+		if ((r[1] & 0x80) == 0) {
+			if (*pll_gps_locked < 0)
+				*pll_gps_locked = (r[2] & 0x02) ? 1 : 0;
+		} else if (r[2] == 0xB5 && r[3] == 0x62 &&
+		           r[4] == 0x01 && r[5] == 0x07) {
+			if (*pvt_fix < 0) *pvt_fix = r[28];
+		}
+		if (*pvt_fix >= 0 && *pll_gps_locked >= 0) return;
+	}
 }
 
 struct lbe_device* lbe_open_device(void) {
@@ -74,7 +143,14 @@ struct lbe_device* lbe_open_device(void) {
 					closedir(dir);
 					return NULL;
 				}
-				dev->model = (dev->raw_info.product == PID_LBE_1420) ? LBE_1420 : LBE_1421_DUALOUT;
+				if (dev->raw_info.product == PID_LBE_1420)
+					dev->model = LBE_1420;
+				else if (dev->raw_info.product == PID_LBE_MINI)
+					dev->model = LBE_MINI;
+				else
+					dev->model = LBE_1421_DUALOUT;
+				if (dev->model == LBE_MINI)
+					mini_enable_gps_stream(dev->fd);
 				closedir(dir);
 				return dev;
 			}
@@ -110,7 +186,20 @@ int lbe_get_device_status(struct lbe_device* dev, struct lbe_status* status) {
 	}
 
 	status->raw_status = buf[1];
-	if (dev->model == LBE_1420) {
+	if (dev->model == LBE_MINI) {
+		status->frequency1 = buf[2] | (buf[3] << 8) | (buf[4] << 16) | (buf[5] << 24);
+		status->frequency2 = 0;
+		/* Feature report bit 1 tracks the internal output PLL, not
+		 * the GPS disciplined PLL that the 1420/1421 bit represents.
+		 * Pull both real flags from the input report so Mini uses the
+		 * same semantics as the other models. */
+		int fix = -1, pll = -1;
+		mini_read_input_state(dev->fd, &fix, &pll);
+		if (fix >= 2) status->raw_status |= LBE_GPS_LOCK_BIT;
+		else          status->raw_status &= ~LBE_GPS_LOCK_BIT;
+		if (pll == 1) status->raw_status |= LBE_PLL_LOCK_BIT;
+		else if (pll == 0) status->raw_status &= ~LBE_PLL_LOCK_BIT;
+	} else if (dev->model == LBE_1420) {
 		status->frequency1 = buf[6] | (buf[7] << 8) | (buf[8] << 16) | (buf[9] << 24);
 		status->frequency2 = 0;
 	} else { // LBE_1421
@@ -149,12 +238,12 @@ int lbe_set_frequency(struct lbe_device* dev, int output, uint32_t frequency) {
 	uint8_t buf[REPORT_SIZE] = {0};
 	int res;
 
-	if (dev->model == LBE_1420 && output != 1) {
-		fprintf(stderr, "LBE-1420 only supports output 1\n");
+	if ((dev->model == LBE_1420 || dev->model == LBE_MINI) && output != 1) {
+		fprintf(stderr, "This model only supports output 1\n");
 		return -1;
 	}
 
-	if (dev->model == LBE_1420) {
+	if (dev->model == LBE_1420 || dev->model == LBE_MINI) {
 		buf[0] = LBE_1420_SET_F1;
 		buf[1] = (frequency >>  0) & 0xff;
 		buf[2] = (frequency >>  8) & 0xff;
@@ -187,6 +276,15 @@ int lbe_set_frequency(struct lbe_device* dev, int output, uint32_t frequency) {
 int lbe_set_frequency_temp(struct lbe_device* dev, int output, uint32_t frequency) {
 	uint8_t buf[REPORT_SIZE] = {0};
 	int res;
+
+	/* Mini uses opcode 0x03 for drive strength, not temp freq, and
+	 * the 1421 temp opcode 0x06 causes a USB reset. No known temp
+	 * freq command for this model. */
+	if (dev->model == LBE_MINI) {
+		(void)output; (void)frequency;
+		fprintf(stderr, "Temporary frequency is not supported on Mini\n");
+		return -1;
+	}
 
 	if (dev->model == LBE_1420 && output != 1) {
 		fprintf(stderr, "LBE-1420 only supports output 1\n");

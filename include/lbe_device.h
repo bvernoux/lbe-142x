@@ -7,7 +7,8 @@ struct lbe_device;
 
 enum lbe_model {
 	LBE_1420 = 0,
-	LBE_1421_DUALOUT // dual output
+	LBE_1421_DUALOUT, // dual output
+	LBE_MINI          // Mini Precision GPS Reference Clock
 };
 
 struct lbe_status {

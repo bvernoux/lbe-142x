@@ -6,6 +6,7 @@
 #define PID_LBE_1420 0x2443
 #define PID_LBE_1421 0x2444 // LBE-1421 Dual Output
 #define PID_LBE_1423 0x226f // LBE-1423 differential pps
+#define PID_LBE_MINI 0x2211 // Mini Precision GPS Reference Clock
 
 /* Device status bits */
 #define LBE_GPS_LOCK_BIT  (1 << 0)
@@ -37,5 +38,6 @@
 /* Max supported frequency in Hz */
 #define LBE_1420_MAX_FREQ 1600000000UL
 #define LBE_1421_MAX_FREQ 1400000000UL
+#define LBE_MINI_MAX_FREQ 810000000UL
 
 #endif // LBE_COMMON_H
