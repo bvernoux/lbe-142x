@@ -56,7 +56,71 @@ static int mini_set_feat(int fd, uint8_t op, const uint8_t *args, size_t n) {
 	uint8_t buf[REPORT_SIZE] = {0};
 	buf[1] = op;
 	if (args && n) memcpy(&buf[2], args, n);
-	return ioctl(fd, HIDIOCSFEATURE(REPORT_SIZE), buf);
+	if (ioctl(fd, HIDIOCSFEATURE(REPORT_SIZE), buf) < 0) {
+		perror("HIDIOCSFEATURE");
+		return -1;
+	}
+	return 0;
+}
+
+/* Solve the Si5351-style PLL divider chain for a given target output
+ * frequency. Formula from the Leo Bodnar hardware description and the
+ * hamarituc/lbgpsdo reference: f_out = fin * N2_HS * N2_LS /
+ * (N3 * N1_HS * NC1_LS). Device constraints: N2_HS, N1_HS in [4, 11];
+ * N2_LS, NC1_LS in [2, 2^20] and even, or exactly 1 for NC1_LS; N3 in
+ * [1, 2^19]. Fin is fixed at 97,600 Hz here, matching the vendor tool's
+ * default; that value produces clean integer solutions for 10 MHz and
+ * most multiples of common LO frequencies. Returns 0 on success, -1
+ * if no valid solution was found. */
+static int mini_solve_pll(uint32_t f_out,
+                          uint32_t *fin_out, uint32_t *n3_out,
+                          uint32_t *n2hs_out, uint32_t *n2ls_out,
+                          uint32_t *n1hs_out, uint32_t *nc1_out)
+{
+	const uint32_t f_in = 97600;
+	uint64_t a = f_out, b = f_in;
+	while (b) { uint64_t t = b; b = a % b; a = t; }
+	uint64_t p = f_out / a;
+	uint64_t q = f_in / a;
+
+	/* Two passes: first prefer a VCO frequency near the values seen
+	 * on the wire (5 to 6.5 GHz); if no exact divider fit exists in
+	 * that band, accept any valid solution. */
+	for (int pass = 0; pass < 2; pass++) {
+		for (uint32_t k = 1; k <= 4096; k++) {
+			uint64_t M = (uint64_t)k * p;
+			uint64_t D = (uint64_t)k * q;
+			if (M > (uint64_t)11 * (1ULL << 20)) break;
+			if (D > (uint64_t)11 * (1ULL << 20) * (1ULL << 19)) break;
+
+			uint64_t f_osc = (uint64_t)f_in * M;
+			if (pass == 0 && (f_osc < 5000000000ULL || f_osc > 6500000000ULL))
+				continue;
+
+			for (int nh = 11; nh >= 4; nh--) {
+				if (M % nh) continue;
+				uint64_t n2ls = M / nh;
+				if (n2ls < 2 || n2ls > (1ULL << 20) || (n2ls & 1)) continue;
+
+				for (int nh1 = 11; nh1 >= 4; nh1--) {
+					if (D % nh1) continue;
+					uint64_t nc1 = D / nh1;
+					int ok = (nc1 == 1) ||
+					         (nc1 >= 2 && nc1 <= (1ULL << 20) && (nc1 & 1) == 0);
+					if (!ok) continue;
+
+					*fin_out  = f_in;
+					*n3_out   = 1;
+					*n2hs_out = (uint32_t)nh;
+					*n2ls_out = (uint32_t)n2ls;
+					*n1hs_out = (uint32_t)nh1;
+					*nc1_out  = (uint32_t)nc1;
+					return 0;
+				}
+			}
+		}
+	}
+	return -1;
 }
 
 /* The Mini boots with only u-blox CFG-ACKs in its input-report buffer.
@@ -187,7 +251,18 @@ int lbe_get_device_status(struct lbe_device* dev, struct lbe_status* status) {
 
 	status->raw_status = buf[1];
 	if (dev->model == LBE_MINI) {
-		status->frequency1 = buf[2] | (buf[3] << 8) | (buf[4] << 16) | (buf[5] << 24);
+		/* The feature report mirrors the PLL programming frame. Decode
+		 * fin, dividers, and compute f_out = fin * N2_HS * N2_LS /
+		 * (N3 * N1_HS * NC1_LS). */
+		uint32_t fin  = buf[2] | (buf[3] << 8) | (buf[4] << 16);
+		uint32_t n3   = (buf[5] | (buf[6] << 8) | (buf[7] << 16)) + 1;
+		uint32_t n2hs = buf[8] + 4;
+		uint32_t n2ls = (buf[9] | (buf[10] << 8) | (buf[11] << 16)) + 1;
+		uint32_t n1hs = buf[12] + 4;
+		uint32_t nc1  = (buf[13] | (buf[14] << 8) | (buf[15] << 16)) + 1;
+		uint64_t den = (uint64_t)n3 * n1hs * nc1;
+		status->frequency1 = den ?
+		    (uint32_t)(((uint64_t)fin * n2hs * n2ls) / den) : 0;
 		status->frequency2 = 0;
 		/* Feature report bit 1 tracks the internal output PLL, not
 		 * the GPS disciplined PLL that the 1420/1421 bit represents.
@@ -243,7 +318,53 @@ int lbe_set_frequency(struct lbe_device* dev, int output, uint32_t frequency) {
 		return -1;
 	}
 
-	if (dev->model == LBE_1420 || dev->model == LBE_MINI) {
+	if (dev->model == LBE_MINI) {
+		/* Mini's opcode 0x04 is a full Si5351-style PLL program:
+		 *   buf[2..4]   fin (3-byte LE)
+		 *   buf[5..7]   N3 - 1 (3-byte LE)
+		 *   buf[8]      N2_HS - 4
+		 *   buf[9..11]  N2_LS - 1 (3-byte LE)
+		 *   buf[12]     N1_HS - 4
+		 *   buf[13..15] NC1_LS - 1 (3-byte LE)
+		 *   buf[16..18] NC2_LS - 1 (3-byte LE)
+		 *   buf[19]     SKEW
+		 *   buf[20]     BWSEL
+		 * f_out = fin * N2_HS * N2_LS / (N3 * N1_HS * NC1_LS). */
+		uint32_t fin = 0, n3 = 0, n2hs = 0, n2ls = 0, n1hs = 0, nc1 = 0;
+		if (mini_solve_pll(frequency, &fin, &n3, &n2hs, &n2ls, &n1hs, &nc1) < 0) {
+			fprintf(stderr, "Mini: no valid PLL divider chain for %u Hz\n",
+			        frequency);
+			return -1;
+		}
+		uint8_t p[19] = {0};
+		p[0]  = fin & 0xFF;
+		p[1]  = (fin >> 8) & 0xFF;
+		p[2]  = (fin >> 16) & 0xFF;
+		uint32_t n3m = n3 - 1;
+		p[3]  = n3m & 0xFF;
+		p[4]  = (n3m >> 8) & 0xFF;
+		p[5]  = (n3m >> 16) & 0xFF;
+		p[6]  = (uint8_t)(n2hs - 4);
+		uint32_t n2lsm = n2ls - 1;
+		p[7]  = n2lsm & 0xFF;
+		p[8]  = (n2lsm >> 8) & 0xFF;
+		p[9]  = (n2lsm >> 16) & 0xFF;
+		p[10] = (uint8_t)(n1hs - 4);
+		uint32_t nc1m = nc1 - 1;
+		p[11] = nc1m & 0xFF;
+		p[12] = (nc1m >> 8) & 0xFF;
+		p[13] = (nc1m >> 16) & 0xFF;
+		/* NC2_LS copies NC1_LS (single-output Mini; the vendor tool
+		 * does the same in its captured 10 MHz frame). */
+		p[14] = nc1m & 0xFF;
+		p[15] = (nc1m >> 8) & 0xFF;
+		p[16] = (nc1m >> 16) & 0xFF;
+		p[17] = 0;  /* SKEW */
+		p[18] = 9;  /* BWSEL, matches captured default */
+		return mini_set_feat(dev->fd, LBE_1420_SET_F1, p, sizeof p);
+	}
+
+	if (dev->model == LBE_1420) {
 		buf[0] = LBE_1420_SET_F1;
 		buf[1] = (frequency >>  0) & 0xff;
 		buf[2] = (frequency >>  8) & 0xff;
@@ -322,18 +443,26 @@ int lbe_set_frequency_temp(struct lbe_device* dev, int output, uint32_t frequenc
 }
 
 int lbe_set_outputs_enable(struct lbe_device* dev, int enable) {
-	uint8_t buf[REPORT_SIZE] = {0};
-	int res;
+	/* Vendor tool sends this with wValue=0x0300 and buf[2]=3 for
+	 * enable / 0 for disable. Value 3 comes from the UI combo box
+	 * index being multiplied by 3 (see sub_4134f0 in the Windows
+	 * binary). The legacy buf[0]=opcode form does not latch the
+	 * output stage on the Mini, so the signal never reaches REF IN. */
+	if (dev->model == LBE_MINI) {
+		uint8_t arg = enable ? 0x03 : 0x00;
+		if (mini_set_feat(dev->fd, LBE_142X_EN_OUT, &arg, 1) < 0)
+			return -1;
+		return 0;
+	}
 
+	uint8_t buf[REPORT_SIZE] = {0};
 	buf[0] = LBE_142X_EN_OUT;
 	buf[1] = enable ? (dev->model == LBE_1421_DUALOUT ? 0x03 : 0x01) : 0x00;
 
-	res = ioctl(dev->fd, HIDIOCSFEATURE(REPORT_SIZE), buf);
-	if (res < 0) {
+	if (ioctl(dev->fd, HIDIOCSFEATURE(REPORT_SIZE), buf) < 0) {
 		perror("HIDIOCSFEATURE");
 		return -1;
 	}
-
 	return 0;
 }
 
