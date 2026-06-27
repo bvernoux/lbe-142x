@@ -41,6 +41,7 @@ set(SOURCES
     src/model_mini.c
     src/gnss_view.c
     src/nmea.c
+    src/ubx.c
 )
 if(WIN32)
     list(APPEND SOURCES src/lbe_transport_windows.c src/lbe_serial_windows.c)
@@ -57,6 +58,7 @@ set(HEADERS
     include/gnss_view.h
     include/nmea.h
     include/lbe_serial.h
+    include/ubx.h
 )
 
 if(NOT MSVC)

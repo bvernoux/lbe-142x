@@ -49,7 +49,26 @@ static int ioctl_retry(int fd, unsigned long req, void *arg) {
 
 struct lbe_transport {
 	int fd;
+	char serial[64];
 };
+
+/* Read the USB iSerial for a hidraw node from sysfs. The hidraw class symlink
+ * points at the HID device; its grandparent is the USB device, which exposes
+ * a `serial` attribute. e.g. /sys/class/hidraw/hidraw0/device/../../serial */
+static void read_serial(const char *hidraw_name, char *out, size_t n) {
+	out[0] = '\0';
+	char path[PATH_MAX];
+	snprintf(path, sizeof path,
+	         "/sys/class/hidraw/%s/device/../../serial", hidraw_name);
+	FILE *f = fopen(path, "r");
+	if (!f) return;
+	if (fgets(out, (int)n, f)) {
+		size_t len = strlen(out);
+		while (len && (out[len-1] == '\n' || out[len-1] == '\r'))
+			out[--len] = '\0';
+	}
+	fclose(f);
+}
 
 static int probe_hidraw(const char *path, uint16_t vid, const uint16_t *pids,
                         uint16_t *out_pid) {
@@ -76,6 +95,7 @@ static const char *pid_to_name(uint16_t pid) {
 	case 0x2443: return "LBE-1420";
 	case 0x2444: return "LBE-1421";
 	case 0x226f: return "LBE-1423";
+	case 0x2269: return "LBE-1425";
 	case 0x2211: return "LBE-Mini";
 	default:     return "LBE-???";
 	}
@@ -96,6 +116,7 @@ struct lbe_transport *lbe_transport_open(uint16_t vid,
 	char path[PATH_MAX];
 	int matches[8];
 	uint16_t match_pids[8];
+	char match_names[8][256];
 	int match_count = 0;
 	while ((ent = readdir(dir)) != NULL && match_count < 8) {
 		if (strncmp(ent->d_name, "hidraw", 6) != 0) continue;
@@ -105,6 +126,7 @@ struct lbe_transport *lbe_transport_open(uint16_t vid,
 		if (fd < 0) continue;
 		matches[match_count] = fd;
 		match_pids[match_count] = pid;
+		snprintf(match_names[match_count], sizeof match_names[0], "%s", ent->d_name);
 		match_count++;
 	}
 	closedir(dir);
@@ -134,8 +156,15 @@ struct lbe_transport *lbe_transport_open(uint16_t vid,
 	struct lbe_transport *t = calloc(1, sizeof *t);
 	if (!t) { close(matches[0]); return NULL; }
 	t->fd = matches[0];
+	read_serial(match_names[0], t->serial, sizeof t->serial);
 	if (out_pid) *out_pid = match_pids[0];
 	return t;
+}
+
+int lbe_transport_serial(struct lbe_transport *t, char *out, size_t n) {
+	if (!t || !t->serial[0]) { if (n) out[0] = '\0'; return -1; }
+	snprintf(out, n, "%s", t->serial);
+	return 0;
 }
 
 void lbe_transport_close(struct lbe_transport *t) {

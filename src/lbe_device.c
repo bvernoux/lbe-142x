@@ -13,12 +13,14 @@
 struct lbe_device {
 	struct lbe_transport *transport;
 	enum lbe_model model;
+	uint16_t pid;
 	const struct lbe_model_ops *ops;
 };
 
 struct lbe_device *lbe_open_device(uint16_t preferred_pid) {
 	static const uint16_t pids[] = {
-		PID_LBE_1420, PID_LBE_1421, PID_LBE_1423, PID_LBE_MINI, 0
+		PID_LBE_1420, PID_LBE_1421, PID_LBE_1423, PID_LBE_1425,
+		PID_LBE_MINI, 0
 	};
 	uint16_t pid = 0;
 	struct lbe_transport *t = lbe_transport_open(VID_LBE, pids,
@@ -28,6 +30,7 @@ struct lbe_device *lbe_open_device(uint16_t preferred_pid) {
 	struct lbe_device *dev = calloc(1, sizeof *dev);
 	if (!dev) { lbe_transport_close(t); return NULL; }
 	dev->transport = t;
+	dev->pid = pid;
 
 	switch (pid) {
 	case PID_LBE_1420:
@@ -38,11 +41,19 @@ struct lbe_device *lbe_open_device(uint16_t preferred_pid) {
 		dev->model = LBE_MINI;
 		dev->ops = &lbe_ops_mini;
 		break;
+	case PID_LBE_1425:
+		/* 1425 = the 1421 dual-output protocol plus GNSS / dynamic-model
+		 * / NMEA-output commands (lbe_ops_1425). Per-output frequency
+		 * caps are enforced in lbe_max_freq() via the PID. See
+		 * docs/reverse/LBE-1425-config-v1.10.md. */
+		dev->model = LBE_1421_DUALOUT;
+		dev->ops = &lbe_ops_1425;
+		break;
 	case PID_LBE_1423:
 	case PID_LBE_1421:
 	default:
-		/* 1423 shares the 1421 wire format until we capture
-		 * evidence of a difference. */
+		/* 1423 shares the 1421 wire format until we capture evidence
+		 * of a difference. */
 		dev->model = LBE_1421_DUALOUT;
 		dev->ops = &lbe_ops_1421;
 		break;
@@ -60,6 +71,22 @@ void lbe_close_device(struct lbe_device *dev) {
 
 enum lbe_model lbe_get_model(struct lbe_device *dev) {
 	return dev->model;
+}
+
+uint16_t lbe_get_pid(struct lbe_device *dev) {
+	return dev->pid;
+}
+
+int lbe_get_serial(struct lbe_device *dev, char *out, size_t n) {
+	return lbe_transport_serial(dev->transport, out, n);
+}
+
+uint32_t lbe_max_freq(struct lbe_device *dev, int output) {
+	/* The 1425 is the only model with asymmetric per-output limits; every
+	 * other model is symmetric, so fall back to the ops vtable's max_freq. */
+	if (dev->pid == PID_LBE_1425)
+		return output == 1 ? LBE_1425_OUT1_MAX_FREQ : LBE_1425_OUT2_MAX_FREQ;
+	return dev->ops->max_freq;
 }
 
 int lbe_get_device_status(struct lbe_device *dev, struct lbe_status *s) {
@@ -102,12 +129,51 @@ int lbe_set_drive_ma(struct lbe_device *dev, unsigned ma) {
 	return dev->ops->set_drive_ma(dev->transport, ma);
 }
 
+int lbe_set_gnss(struct lbe_device *dev, uint8_t mask) {
+	if (!dev->ops->set_gnss) {
+		fprintf(stderr, "--gnss is not supported on this model\n");
+		return -1;
+	}
+	/* BeiDou is mutually exclusive with the GPS/SBAS/Galileo group. */
+	uint8_t group = LBE_1425_GNSS_GPS | LBE_1425_GNSS_SBAS | LBE_1425_GNSS_GALILEO;
+	if ((mask & LBE_1425_GNSS_BEIDOU) && (mask & group)) {
+		fprintf(stderr, "Invalid GNSS mask 0x%02X: BeiDou (0x08) cannot be "
+		        "combined with GPS/SBAS/Galileo\n", mask);
+		return -1;
+	}
+	return dev->ops->set_gnss(dev->transport, mask);
+}
+
+int lbe_set_dynmodel(struct lbe_device *dev, uint8_t model) {
+	if (!dev->ops->set_dynmodel) {
+		fprintf(stderr, "--dynmodel is not supported on this model\n");
+		return -1;
+	}
+	return dev->ops->set_dynmodel(dev->transport, model);
+}
+
+int lbe_set_nmea(struct lbe_device *dev, int enable) {
+	if (!dev->ops->set_nmea) {
+		fprintf(stderr, "--nmea is not supported on this model\n");
+		return -1;
+	}
+	return dev->ops->set_nmea(dev->transport, enable);
+}
+
 int lbe_monitor(struct lbe_device *dev) {
 	if (!dev->ops->monitor) {
 		fprintf(stderr, "--monitor is not supported on this model\n");
 		return -1;
 	}
 	return dev->ops->monitor(dev->transport);
+}
+
+int lbe_diag(struct lbe_device *dev) {
+	if (!dev->ops->diag) {
+		fprintf(stderr, "--diag is not supported on this model\n");
+		return -1;
+	}
+	return dev->ops->diag(dev->transport);
 }
 
 int lbe_gps_info(struct lbe_device *dev) {

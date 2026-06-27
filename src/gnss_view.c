@@ -36,7 +36,9 @@ void gnss_draw(const char *title,
 	printf("\033[H");
 	printf("%s   (Ctrl-C to exit)" CLR_EOL "\n", title);
 	printf("========================================" CLR_EOL "\n" CLR_EOL "\n");
-	if (frac_ms >= 0 && frac_ms <= 999) {
+	if (!pvt->time_valid) {
+		printf("UTC:  ---------- --:--:-- (no valid time)" CLR_EOL "\n");
+	} else if (frac_ms >= 0 && frac_ms <= 999) {
 		printf("UTC:  %04u-%02u-%02u %02u:%02u:%02u.%03d" CLR_EOL "\n",
 		       pvt->year, pvt->month, pvt->day,
 		       pvt->hour, pvt->min, pvt->sec, frac_ms);

@@ -7,6 +7,7 @@
 #include "lbe_transport.h"
 #include "lbe_platform.h"
 #include "gnss_view.h"
+#include "ubx.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -252,79 +253,11 @@ static int mini_set_1pps(struct lbe_transport *t, int enable) {
 	return -1;
 }
 
-/* UBX NAV-PVT (class 01, id 07) and NAV-SAT (class 01, id 35) decode
- * as the Mini streams them out of the interrupt-IN endpoint. The stream
- * was enabled in mini_init. Redraw a full screen each time we get a fresh
- * NAV-PVT; keep the most recent NAV-SAT alongside. Shared PVT/SVinfo
- * types come from gnss_view.h so the 1421 NMEA path can feed the same
- * renderer. */
-
-static void mini_parse_pvt(const uint8_t *p, int n, struct gnss_pvt *pvt) {
-	if (n < 92) return;
-	pvt->year     = (uint16_t)(p[4] | (p[5] << 8));
-	pvt->month    = p[6];
-	pvt->day      = p[7];
-	pvt->hour     = p[8];
-	pvt->min      = p[9];
-	pvt->sec      = p[10];
-	pvt->fix_type = p[20];
-	pvt->num_sv   = p[23];
-	pvt->lon_1e7  = (int32_t)((uint32_t)p[24] | ((uint32_t)p[25] << 8)
-	                        | ((uint32_t)p[26] << 16) | ((uint32_t)p[27] << 24));
-	pvt->lat_1e7  = (int32_t)((uint32_t)p[28] | ((uint32_t)p[29] << 8)
-	                        | ((uint32_t)p[30] << 16) | ((uint32_t)p[31] << 24));
-	pvt->hmsl_mm  = (int32_t)((uint32_t)p[36] | ((uint32_t)p[37] << 8)
-	                        | ((uint32_t)p[38] << 16) | ((uint32_t)p[39] << 24));
-	pvt->valid = 1;
-}
-
-/* NAV-SAT payload (UBX PROTVER 18+):
- *   p[0..3]  iTOW (u32 LE)
- *   p[4]     version (0x01)
- *   p[5]     numSvs
- *   p[6..7]  reserved
- *   p[8+12*i .. 8+12*i+11] per-SV block:
- *     s[0]    gnssId (0=GPS 1=SBAS 2=Gal 3=BDS 4=IMES 5=QZSS 6=GLO 7=NavIC)
- *     s[1]    svId
- *     s[2]    cno (dB-Hz)
- *     s[3]    elev (i8, deg)
- *     s[4..5] azim (i16 LE, deg)
- *     s[6..7] prRes (i16 LE, m*0.1)
- *     s[8..11] flags (u32 LE): bit 3 = svUsed (used in nav solution) */
-static void mini_parse_sat(const uint8_t *p, int n, struct gnss_svinfo *sv) {
-	if (n < 8) return;
-	uint8_t num = p[5];
-	if ((int)(8 + num * 12) > n) num = (uint8_t)((n - 8) / 12);
-	if (num > 64) num = 64;
-	sv->num_ch = num;
-	for (uint8_t i = 0; i < num; i++) {
-		const uint8_t *s = &p[8 + i * 12];
-		uint32_t flags = (uint32_t)s[8]
-		              | ((uint32_t)s[9]  << 8)
-		              | ((uint32_t)s[10] << 16)
-		              | ((uint32_t)s[11] << 24);
-		sv->sats[i].gnss_id = s[0];
-		sv->sats[i].svid    = s[1];
-		sv->sats[i].cno     = s[2];
-		sv->sats[i].elev    = (int8_t)s[3];
-		sv->sats[i].azim    = (int16_t)((uint16_t)s[4] | ((uint16_t)s[5] << 8));
-		sv->sats[i].used    = (uint8_t)((flags >> 3) & 0x01u);
-	}
-	sv->valid = 1;
-}
-
-/* GNSS rendering moved to gnss_view.c so the 1421 NMEA path can reuse it. */
-
-/* UBX Fletcher-8 checksum over class/id/length/payload. */
-static int mini_ubx_ck_ok(const uint8_t *msg, size_t total) {
-	if (total < 8) return 0;
-	uint8_t ca = 0, cb = 0;
-	for (size_t k = 2; k < total - 2; k++) {
-		ca = (uint8_t)(ca + msg[k]);
-		cb = (uint8_t)(cb + ca);
-	}
-	return ca == msg[total-2] && cb == msg[total-1];
-}
+/* UBX NAV-PVT / NAV-SAT decoding and the Fletcher-8 checksum now live in the
+ * shared ubx.c (also used by the 1425 diagnostics monitor). The Mini keeps
+ * its own framing/reassembly (below) and calls ubx_parse_* / ubx_checksum_ok.
+ * Shared PVT/SVinfo types come from gnss_view.h so the 1421 NMEA path can feed
+ * the same renderer. */
 
 /* Every 64-byte interrupt-IN frame is framed as:
  *   r[0]      = 0x00       (HID Report ID byte prepended by the Windows
@@ -396,7 +329,7 @@ static int mini_consume_ubx(uint8_t *buf, size_t *buf_len, size_t buf_cap,
 		size_t total = (size_t)8 + ubx_len;
 		if (i + total > *buf_len) break;
 
-		if (!mini_ubx_ck_ok(&buf[i], total)) {
+		if (!ubx_checksum_ok(&buf[i], total)) {
 			i++;
 			if (st) { st->ck_fails++; st->resyncs++; }
 			continue;
@@ -407,10 +340,10 @@ static int mini_consume_ubx(uint8_t *buf, size_t *buf_len, size_t buf_cap,
 		const uint8_t *p = &buf[i+6];
 
 		if (class_ == 0x01 && id == 0x07) {
-			mini_parse_pvt(p, ubx_len, pvt);
+			ubx_parse_pvt(p, ubx_len, pvt);
 			if (pvt->valid) pvt_updates++;
 		} else if (class_ == 0x01 && id == 0x35) {
-			mini_parse_sat(p, ubx_len, sv);
+			ubx_parse_sat(p, ubx_len, sv);
 		}
 		if (st) st->parsed++;
 		i += total;
@@ -538,7 +471,7 @@ static int mini_gps_info(struct lbe_transport *t) {
 			if (ulen > 1024) { i++; continue; }
 			size_t total = (size_t)8 + ulen;
 			if (i + total > buf_len) break;
-			if (!mini_ubx_ck_ok(&buf[i], total)) { i++; continue; }
+			if (!ubx_checksum_ok(&buf[i], total)) { i++; continue; }
 
 			if (buf[i+2] == 0x0A && buf[i+3] == 0x04 && ulen >= 40) {
 				const uint8_t *p = &buf[i+6];

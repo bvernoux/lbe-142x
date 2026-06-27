@@ -94,7 +94,7 @@ static int m1420_set_pll_mode(struct lbe_transport *t, int fll_mode) {
 
 static int m1420_set_1pps(struct lbe_transport *t, int enable) {
 	(void)t; (void)enable;
-	fprintf(stderr, "1PPS control is only supported on LBE-1421\n");
+	fprintf(stderr, "1PPS control is only supported on LBE-1421/1423/1425\n");
 	return -1;
 }
 

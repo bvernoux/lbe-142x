@@ -90,6 +90,9 @@ static int handle_gga(char **f, int nf, struct gnss_pvt *pvt) {
 	pvt->fix_type = (uint8_t)(quality > 0 ? 3 : 0);
 	pvt->num_sv   = (uint8_t)atoi(f[7]);
 	pvt->hmsl_mm  = (int32_t)(atof(f[9]) * 1000.0);
+	/* GGA arrives every cycle, so it owns clearing time_valid on fix loss;
+	 * RMC (which carries the date) confirms it. */
+	pvt->time_valid = (quality > 0);
 	pvt->valid    = 1;
 	return NMEA_GOT_PVT;
 }
@@ -101,6 +104,7 @@ static int handle_rmc(char **f, int nf, struct gnss_pvt *pvt) {
 	pvt->lat_1e7 = parse_lat_lon(f[3], f[4]);
 	pvt->lon_1e7 = parse_lat_lon(f[5], f[6]);
 	parse_date(f[9], &pvt->year, &pvt->month, &pvt->day);
+	pvt->time_valid = 1;   /* status 'A' -> date+time trustworthy */
 	pvt->valid = 1;
 	return NMEA_GOT_PVT;
 }

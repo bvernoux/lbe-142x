@@ -29,6 +29,10 @@ struct lbe_transport *lbe_transport_open(uint16_t vid,
                                           uint16_t *out_pid);
 void lbe_transport_close(struct lbe_transport *t);
 
+/* Copy the device's USB iSerial string (NUL-terminated) into out. Returns 0
+ * if a non-empty serial was available, -1 otherwise. */
+int lbe_transport_serial(struct lbe_transport *t, char *out, size_t n);
+
 /* Send a HID Feature report.
  *
  *   report_id  HID Report ID. 0 for devices without a Report ID

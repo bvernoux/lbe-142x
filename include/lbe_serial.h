@@ -8,7 +8,7 @@
 #include <stddef.h>
 
 /* Thin cross-platform wrapper around a CDC / tty serial port. Used to
- * read NMEA from the LBE-1421/1423 COM port. */
+ * read NMEA from the LBE-1421/1423/1425 COM port. */
 struct lbe_serial;
 
 /* Open the port at `path`. On Windows expects "COM12" (without the
@@ -29,7 +29,7 @@ int lbe_serial_readline(struct lbe_serial *s, char *buf, size_t n,
 int lbe_serial_find_nmea(char *out, size_t n);
 
 /* Read the current state of the DCD (RLSD) modem status line. The
- * LBE-1421/1423 drives this from its u-blox 1PPS output. Returns 1 if
+ * LBE-1421/1423/1425 drives this from its u-blox 1PPS output. Returns 1 if
  * asserted, 0 if deasserted, -1 on error. */
 int lbe_serial_get_dcd(struct lbe_serial *s);
 

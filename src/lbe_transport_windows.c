@@ -53,6 +53,7 @@ static int ctrl_transfer_retry(libusb_device_handle *h, uint8_t bmReq,
 struct lbe_transport {
 	libusb_device_handle *handle;
 	int interface_claimed;
+	char serial[64];
 };
 
 static int libusb_ref = 0;
@@ -62,6 +63,7 @@ static const char *pid_to_name(uint16_t pid) {
 	case 0x2443: return "LBE-1420";
 	case 0x2444: return "LBE-1421";
 	case 0x226f: return "LBE-1423";
+	case 0x2269: return "LBE-1425";
 	case 0x2211: return "LBE-Mini";
 	default:     return "LBE-???";
 	}
@@ -148,9 +150,23 @@ struct lbe_transport *lbe_transport_open(uint16_t vid,
 	}
 	t->handle = h;
 	t->interface_claimed = 0;
+	/* Best-effort USB iSerial read (non-fatal if it fails). */
+	struct libusb_device_descriptor desc;
+	if (libusb_get_device_descriptor(devs[match_idx[0]], &desc) == 0
+	    && desc.iSerialNumber) {
+		libusb_get_string_descriptor_ascii(h, desc.iSerialNumber,
+		                                   (unsigned char *)t->serial,
+		                                   (int)sizeof t->serial);
+	}
 	if (out_pid) *out_pid = match_pid[0];
 	libusb_free_device_list(devs, 1);
 	return t;
+}
+
+int lbe_transport_serial(struct lbe_transport *t, char *out, size_t n) {
+	if (!t || !t->serial[0]) { if (n) out[0] = '\0'; return -1; }
+	snprintf(out, n, "%s", t->serial);
+	return 0;
 }
 
 void lbe_transport_close(struct lbe_transport *t) {
@@ -207,7 +223,7 @@ static int feat_get_impl(struct lbe_transport *t, uint8_t report_id,
 		                      report_id, libusb_error_name(rc));
 		return -1;
 	}
-	/* For numbered-RID devices (LBE-1420/1421/1423, RID 0x4B and opcode
+	/* For numbered-RID devices (LBE-1420/1421/1423/1425, RID 0x4B and opcode
 	 * RIDs), WinUSB returns one extra prefix byte ahead of the firmware's
 	 * RID echo that Linux hidraw does not surface. Skip it so the byte
 	 * offsets the model code uses match between platforms. Mini (implicit
