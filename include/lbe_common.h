@@ -41,7 +41,7 @@
 
 /* Mini-specific opcodes (differ from 1420/1421 at the same opcode numbers).
  * LBE_MINI_SET_PLL shares its opcode with LBE_1420_SET_F1 but carries a full
- * Si5351C divider-chain program (fin, N3, N2_HS, N2_LS, N1_HS, NC1_LS, NC2_LS,
+ * Si5328 divider-chain program (fin, N3, N2_HS, N2_LS, N1_HS, NC1_LS, NC2_LS,
  * SKEW, BW) instead of a raw frequency. LBE_MINI_SET_DRIVE collides with
  * LBE_1420_SET_F1_TEMP; on Mini the payload is a 2-bit output-drive forward
  * index (0=8 mA, 1=16 mA, 2=24 mA, 3=32 mA factory default). Readback in
