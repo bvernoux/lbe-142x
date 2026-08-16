@@ -29,7 +29,7 @@ static int mini_cmd(struct lbe_transport *t, uint8_t op,
 	return lbe_transport_feat_set(t, 0, buf);
 }
 
-/* Solve the Si5351 divider chain for `f_out`.
+/* Solve the Si5328 divider chain for `f_out`.
  * f_out = f_in * N2_HS * N2_LS / (N3 * N1_HS * NC1_LS).
  * Constraints: N2_HS, N1_HS in [4,11]; N2_LS, NC1_LS in [2,2^20] even
  * (NC1_LS may also be 1); N3 in [1,2^19]. f_in fixed at 97600 Hz --
@@ -46,7 +46,7 @@ static int mini_solve_pll(uint32_t f_out,
 	uint64_t p = f_out / a;
 	uint64_t q = f_in / a;
 
-	/* Two passes: first prefer a VCO near the Si5351's 5-6.5 GHz
+	/* Two passes: first prefer a VCO near the Si5328's 5-6.5 GHz
 	 * native band; if no divider set fits there, accept any valid
 	 * one. */
 	for (int pass = 0; pass < 2; pass++) {
@@ -125,7 +125,7 @@ static int mini_get_status(struct lbe_transport *t, struct lbe_status *s) {
 	/* Feature report, verified against the vendor v1.17 UI:
 	 *   f[0]       outputs enable (0=off, non-zero=on; vendor writes 3)
 	 *   f[1]       drive strength forward index: 0=8mA, 1=16mA,
-	 *              2=24mA, 3=32mA (= Si5351C register field)
+	 *              2=24mA, 3=32mA (= Si5328 register field)
 	 *   f[2..4]    fin, 3-byte LE
 	 *   f[5..7]    N3-1
 	 *   f[8]       N2_HS-4
@@ -570,7 +570,7 @@ static int mini_set_power_level(struct lbe_transport *t, int output, int low) {
 		fprintf(stderr, "Mini only supports output 1\n");
 		return -1;
 	}
-	/* Forward index: 0=8mA ... 3=32mA (= Si5351C CLK_x DRV field). The
+	/* Forward index: 0=8mA ... 3=32mA (= Si5328 CLK_x DRV field). The
 	 * bool --pwr1 API only picks the two extremes: low=1 -> 8 mA,
 	 * low=0 -> 32 mA. Use --drive <8|16|24|32> for the middle levels. */
 	uint8_t arg = low ? 0x00 : 0x03;
