@@ -30,7 +30,7 @@ Runs on Windows (MSVC / MinGW64) and GNU/Linux (tested on Windows 11 x64 and Ubu
 - Live 1PPS chronometer: sub-second UTC interpolated from DCD edges, rolling jitter stats
 
 ### LBE-Mini specific
-- `--drive <8|16|24|32>` — set OUT1 Si5351C drive strength in mA (four-level)
+- `--drive <8|16|24|32>` — set OUT1 Si5328 drive strength in mA (four-level)
 - `--monitor` parses UBX NAV-PVT / NAV-SAT / NAV-CLOCK from the HID interrupt-IN endpoint
 - `--gps-info` — UBX-MON-VER (u-blox SW/HW version + protocol extensions)
 
